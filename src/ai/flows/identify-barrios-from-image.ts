@@ -1,15 +1,45 @@
+
 'use server';
 
 /**
- * @fileOverview Identifies Cordoba barrios overlapping with areas marked in an image using Google Maps and vector analysis.
+ * @fileOverview Identifies Cordoba barrios overlapping with areas marked in an image.
+ * It also attempts to return the polygon coordinates for the identified barrios.
  *
  * - identifyBarriosFromImage - A function that identifies barrios based on image overlap.
  * - IdentifyBarriosFromImageInput - The input type for the identifyBarriosFromImage function.
- * - IdentifyBarriosFromImageOutput - The return type for the identifyBarriosFromImage function.
+ * - IdentifyBarriosFromImageOutput - The return type for the identifyBarriosFromImage function (defined in @/types).
  */
 
 import {ai} from '@/ai/genkit';
 import {z} from 'genkit';
+import type { IdentifyBarriosOutput } from '@/types'; // Import general output type
+
+// Define PuntosSegurosInfoSchema here for local schema consistency if needed, or rely on global type.
+// For clarity, we'll define the output schema explicitly for this flow.
+
+const PuntosSegurosInfoSchema = z.object({
+  totalPuntos: z.number().describe('Total number of external points in this barrio.'),
+  categoriasPuntos: z.record(z.string(), z.number()).describe('Count of external points per category.'),
+}).optional();
+
+
+const BarrioOutputSchema = z.object({
+  barrioName: z.string().describe('The name of the Cordoba barrio.'),
+  overlapType: z
+    .enum(['total', 'partial', 'none'])
+    .describe('The type of overlap with the marked area in the image (total, partial, or none).'),
+  overlapPercentage: z
+    .number()
+    .optional()
+    .describe('The percentage of the marked area that overlaps with the barrio (only for partial overlaps with the marked area).'),
+  barrioPolygonCoordinates: z
+    .array(z.array(z.number()).length(2))
+    .optional()
+    .describe('The geographic coordinates defining the boundary of the identified barrio, as an array of [longitude, latitude] pairs. This should represent the entire barrio, not just the overlapping part.'),
+  puntosCbaSegura: PuntosSegurosInfoSchema.describe("Information about cbasegura.com.ar points. This flow will not populate it; another flow will.").optional(),
+});
+
+const IdentifyBarriosFromImageOutputSchema = z.array(BarrioOutputSchema);
 
 const IdentifyBarriosFromImageInputSchema = z.object({
   imageUri: z
@@ -20,45 +50,35 @@ const IdentifyBarriosFromImageInputSchema = z.object({
 });
 export type IdentifyBarriosFromImageInput = z.infer<typeof IdentifyBarriosFromImageInputSchema>;
 
-const BarrioOverlapSchema = z.object({
-  barrioName: z.string().describe('The name of the Cordoba barrio.'),
-  overlapType: z
-    .enum(['total', 'partial', 'none'])
-    .describe('The type of overlap (total, partial, or none).'),
-  overlapPercentage: z
-    .number()
-    .optional()
-    .describe('The percentage of overlap (only for partial overlaps).'),
-  polygonCoordinates:
-    z.array(z.array(z.number()).length(2)).optional().describe('The coordinates of the polygon where the barrio and marked area overlap (only for partial overlaps).'),
-});
-
-const IdentifyBarriosFromImageOutputSchema = z.array(BarrioOverlapSchema);
-
-export type IdentifyBarriosFromImageOutput = z.infer<typeof IdentifyBarriosFromImageOutputSchema>;
 
 export async function identifyBarriosFromImage(
   input: IdentifyBarriosFromImageInput
-): Promise<IdentifyBarriosFromImageOutput> {
-  return identifyBarriosFromImageFlow(input);
+): Promise<IdentifyBarriosOutput> { // Using the global type for the function's promise
+  const result = await identifyBarriosFromImageFlow(input);
+  // Ensure the result matches the global IdentifyBarriosOutput type,
+  // even if this specific flow doesn't populate all optional fields like puntosCbaSegura.
+  return result as IdentifyBarriosOutput;
 }
 
 const identifyBarriosFromImagePrompt = ai.definePrompt({
   name: 'identifyBarriosFromImagePrompt',
   input: {schema: IdentifyBarriosFromImageInputSchema},
-  output: {schema: IdentifyBarriosFromImageOutputSchema},
-  prompt: `You are an expert in geospatial analysis and Cordoba geography.
+  output: {schema: IdentifyBarriosFromImageOutputSchema}, // Use the locally defined output schema for the prompt
+  prompt: `You are an expert in geospatial analysis and Cordoba, Argentina geography.
 
-  Analyze the image provided to identify which barrios in Cordoba, Argentina, overlap with the areas marked in the image.
+  Analyze the image provided to identify which barrios (neighborhoods) in Cordoba, Argentina, are present or overlap with any specially marked or shaded areas in the image.
 
-  For each barrio, determine if the overlap is total, partial, or none. If the overlap is partial, provide an estimated percentage of overlap and the coordinates of the overlapping polygon.
+  For each barrio you identify:
+  1.  **barrioName**: The name of the barrio.
+  2.  **overlapType**: Determine if its overlap with a marked/shaded area is 'total', 'partial', or 'none'. If no specific area is marked, focus on identifying barrios visible.
+  3.  **overlapPercentage**: If 'partial' overlap, estimate the percentage of the marked/shaded area that this barrio covers. Omit if 'total' or 'none'.
+  4.  **barrioPolygonCoordinates**: Crucially, for *every* barrio identified (regardless of its overlapType with a marked area), provide the geographic coordinates that define its approximate boundary. These coordinates should be an array of [longitude, latitude] pairs, forming a polygon. Example: [[-64.18, -31.41], [-64.17, -31.41], [-64.17, -31.42], [-64.18, -31.42], [-64.18, -31.41]].
 
   Use the following image as your primary source of information:
   {{media url=imageUri}}
 
-  Present your analysis in a structured format, listing each barrio and its corresponding overlap status, percentage (if partial), and polygon coordinates (if partial).
-
-  The output should be a JSON array, where each object contains barrioName, overlapType, overlapPercentage, and polygonCoordinates.
+  Present your analysis as a JSON array of objects, where each object conforms to the defined output schema (barrioName, overlapType, overlapPercentage, barrioPolygonCoordinates).
+  The field 'puntosCbaSegura' should not be populated by this prompt.
 `,
 });
 
@@ -66,7 +86,7 @@ const identifyBarriosFromImageFlow = ai.defineFlow(
   {
     name: 'identifyBarriosFromImageFlow',
     inputSchema: IdentifyBarriosFromImageInputSchema,
-    outputSchema: IdentifyBarriosFromImageOutputSchema,
+    outputSchema: IdentifyBarriosFromImageOutputSchema, // Matches prompt's output schema
   },
   async input => {
     const {output} = await identifyBarriosFromImagePrompt(input);
